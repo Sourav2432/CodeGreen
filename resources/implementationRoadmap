@@ -1,0 +1,467 @@
+
+# 🧱 OVERALL BUILD STRATEGY
+
+You are building 5 core engines:
+
+1. Log Ingestion Engine
+2. Normalization Engine
+3. Correlation + UEBA Engine
+4. Pattern Cache Engine
+5. LLM Playbook Engine
+
+Each phase builds one layer.
+
+You have **2 machines**:
+
+* Machine 1 → Target (simulated bank server)
+* Machine 2 → SOC Engine (your system)
+
+---
+
+# 🔵 PHASE 1 — Infrastructure Setup (Days 1–3)
+
+## 🎯 Goal
+
+Get logs flowing from Machine 1 to Machine 2.
+
+---
+
+## Machine 1 (Target Setup)
+
+Install:
+
+```bash
+sudo apt update
+sudo apt install auditd openssh-server rsyslog
+```
+
+Enable audit rules:
+
+```bash
+-w /etc/passwd -p wa -k passwd_changes
+-w /etc/sudoers -p wa -k sudo_changes
+-a always,exit -F arch=b64 -S execve -k command_exec
+```
+
+Verify:
+
+```bash
+sudo ausearch -k command_exec
+```
+
+---
+
+## Machine 2 (SOC Setup)
+
+Install:
+
+```bash
+sudo apt install python3 python3-pip redis-server
+pip install fastapi uvicorn pyod tsfresh scikit-learn
+```
+
+Install Ollama locally:
+
+```bash
+curl -fsSL https://ollama.com/install.sh | sh
+ollama pull mistral
+```
+
+---
+
+## Log Transfer (Simple Method First)
+
+On Machine 2:
+Create pull script:
+
+```bash
+scp user@machine1:/var/log/auth.log ./logs/
+scp user@machine1:/var/log/audit/audit.log ./logs/
+```
+
+Automate with cron every 30 seconds.
+
+---
+
+## ✅ Deliverable End of Phase 1
+
+* Logs from Machine 1 appear on Machine 2.
+* No AI yet.
+* Just verified pipeline.
+
+---
+
+# 🟢 PHASE 2 — Log Normalization Engine (Days 4–6)
+
+## 🎯 Goal
+
+Convert raw logs into structured JSON.
+
+---
+
+## Step 1 — Build Parser Module
+
+Create:
+
+```
+/soc_engine/
+    ingestion/
+        auth_parser.py
+        audit_parser.py
+```
+
+Each parser converts raw log lines into unified schema:
+
+```python
+{
+  "timestamp": "",
+  "host": "",
+  "user": "",
+  "event_type": "",
+  "source_ip": "",
+  "command": "",
+  "raw": ""
+}
+```
+
+---
+
+## Step 2 — Store in Local Database
+
+Use SQLite (simple):
+
+```python
+CREATE TABLE events (
+    id INTEGER PRIMARY KEY,
+    timestamp TEXT,
+    host TEXT,
+    user TEXT,
+    event_type TEXT,
+    source_ip TEXT,
+    command TEXT,
+    anomaly_score REAL
+);
+```
+
+Insert normalized logs.
+
+---
+
+## ✅ Deliverable
+
+* All logs converted to structured format.
+* Queryable locally.
+* No ML yet.
+
+---
+
+# 🟡 PHASE 3 — UEBA + Anomaly Detection (Days 7–10)
+
+## 🎯 Goal
+
+Detect abnormal behavior.
+
+---
+
+## Step 1 — Feature Extraction
+
+For each user:
+
+Compute:
+
+* Login frequency per hour
+* Failed login count
+* Unique IP count
+* Command frequency
+* First-time command usage
+
+Use tsfresh or simple rolling stats.
+
+---
+
+## Step 2 — Anomaly Model
+
+Use PyOD:
+
+```python
+from pyod.models.iforest import IForest
+
+model = IForest()
+model.fit(user_behavior_vectors)
+scores = model.decision_function(new_event)
+```
+
+Add anomaly_score to database.
+
+---
+
+## Step 3 — Threshold Rule
+
+If:
+
+```
+anomaly_score > 0.8
+```
+
+→ Mark as suspicious
+
+---
+
+## ✅ Deliverable
+
+System flags abnormal events automatically.
+
+---
+
+# 🟠 PHASE 4 — Correlation Engine (Days 11–14)
+
+## 🎯 Goal
+
+Group related events into incidents.
+
+---
+
+## Step 1 — Time Window Aggregation
+
+Group events:
+
+* Same user
+* Same host
+* Within 10-minute window
+
+---
+
+## Step 2 — Correlation Rules
+
+Example rules:
+
+```
+IF failed_ssh > 5 AND successful_ssh = 1
+→ Possible brute force success
+```
+
+```
+IF sudo_exec AND anomaly_score high
+→ Privilege escalation
+```
+
+Build rule engine module:
+
+```
+correlation/rule_engine.py
+```
+
+---
+
+## Step 3 — Incident Object Creation
+
+Create incident JSON:
+
+```json
+{
+  "incident_id": "...",
+  "pattern_features": {...},
+  "severity": "high"
+}
+```
+
+---
+
+## ✅ Deliverable
+
+System produces structured INCIDENT objects.
+
+---
+
+# 🔴 PHASE 5 — Pattern Fingerprinting + Cache (Days 15–17)
+
+## 🎯 Goal
+
+Avoid recomputing known incidents.
+
+---
+
+## Step 1 — Fingerprint Generator
+
+Convert pattern features into deterministic string.
+
+Hash using SHA256.
+
+---
+
+## Step 2 — Cache System
+
+Use Redis or SQLite table:
+
+```
+CREATE TABLE playbook_cache (
+  pattern_id TEXT PRIMARY KEY,
+  playbook TEXT,
+  validated BOOLEAN
+);
+```
+
+---
+
+## Step 3 — Cache Lookup Logic
+
+Workflow:
+
+```
+incident → fingerprint
+if fingerprint in cache:
+    return cached_playbook
+else:
+    call LLM
+```
+
+---
+
+## ✅ Deliverable
+
+Repeat incidents return instant responses.
+
+---
+
+# 🟣 PHASE 6 — LLM Playbook Engine (Days 18–21)
+
+## 🎯 Goal
+
+Generate response steps.
+
+---
+
+## Step 1 — Prompt Engineering
+
+Create structured prompt template:
+
+```
+You are a Linux SOC analyst.
+Incident details:
+...
+Return structured JSON:
+{
+  "classification": "",
+  "severity": "",
+  "containment": [],
+  "forensics": [],
+  "remediation": []
+}
+```
+
+---
+
+## Step 2 — Ollama Integration
+
+```python
+import ollama
+response = ollama.chat(model="mistral", messages=[...])
+```
+
+Parse JSON output.
+
+---
+
+## Step 3 — Validator Layer
+
+Check if:
+
+* Contains containment steps
+* Mentions isolation
+* Mentions log preservation
+
+Reject vague output.
+
+---
+
+## Step 4 — Store Approved Playbook
+
+Insert into cache.
+
+---
+
+## ✅ Deliverable
+
+System generates structured playbooks offline.
+
+---
+
+# ⚫ PHASE 7 — API + Dashboard (Days 22–25)
+
+## 🎯 Goal
+
+Expose system cleanly.
+
+Use FastAPI:
+
+Endpoints:
+
+```
+GET /incidents
+GET /incident/{id}
+GET /playbook/{incident_id}
+```
+
+Optional:
+Simple HTML dashboard.
+
+---
+
+# 🧪 PHASE 8 — Testing & Evaluation (Days 26–30)
+
+Now simulate attacks.
+
+## On Machine 2 (Attacker):
+
+### 1. SSH Brute Force
+
+### 2. Privilege escalation
+
+### 3. Cron persistence
+
+### 4. Data exfil simulation
+
+---
+
+## Measure:
+
+* Detection time
+* Correct classification
+* Severity accuracy
+* Playbook coverage
+* Cache speed improvement
+
+---
+
+# 📁 FINAL PROJECT STRUCTURE
+
+```
+soc_engine/
+│
+├── ingestion/
+├── normalization/
+├── ueba/
+├── correlation/
+├── fingerprint/
+├── cache/
+├── llm/
+├── api/
+├── evaluation/
+└── logs/
+```
+
+---
+
+# 🏁 FINAL RESULT
+
+You now have:
+
+✔ Simulated EDR (auditd)
+✔ Simulated SIEM (log aggregation)
+✔ UEBA anomaly detection
+✔ Correlation engine
+✔ Pattern fingerprinting
+✔ Cached known responses
+✔ Offline LLM playbook generation
+✔ Measurable evaluation
+
