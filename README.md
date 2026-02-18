@@ -4,7 +4,7 @@ Lightweight AI-powered SIEM built from scratch using only auth.log and audit.log
 
 ---
 
-* Overview
+## Overview
 
 This project simulates a Security Operations Center (SOC) using two Linux machines:
 
@@ -17,7 +17,7 @@ This project focuses on understanding SIEM internals instead of relying on ELK, 
 
 ---
 
-* Log Sources Used
+## Log Sources Used
 
 Only the following logs are ingested:
 
@@ -37,7 +37,7 @@ Only the following logs are ingested:
 
 ---
 
-* High-Level Workflow
+## High-Level Workflow
 
 1. Log Generation  
    Machine 1 generates authentication and system activity logs in:
@@ -96,24 +96,24 @@ Only the following logs are ingested:
 
 ---
 
-* Architecture
+## Architecture
 
 Machine 1 (Target)
-  → Generates auth.log and audit.log
-  → Exposes logs securely via SSH
+  → Generates auth.log and audit.log  
+  → Exposes logs securely via SSH  
 
 Machine 2 (SOC Engine)
-  → Log ingestion module
-  → Normalization engine
-  → Correlation logic
-  → UEBA engine
-  → Pattern cache
-  → LLM-based incident explanation
+  → Log ingestion module  
+  → Normalization engine  
+  → Correlation logic  
+  → UEBA engine  
+  → Pattern cache  
+  → LLM-based incident explanation  
   → Alert output (console / JSON)
 
 ---
 
-* Tech Stack
+## Tech Stack
 
 Programming Language
 - Python (core engine)
@@ -144,7 +144,7 @@ Infrastructure
 
 ---
 
-* Example Detection Scenario
+## Example Detection Scenario
 
 1. 8 failed SSH login attempts (auth.log)
 2. 1 successful login from same IP
@@ -159,11 +159,3 @@ System response:
 - LLM produces structured incident explanation and recommended actions
 
 ---
-
-* Key Capabilities
-
-- Custom SIEM logic built from scratch
-- Cross-correlation between auth.log and audit.log
-- Behavioral anomaly detection
-- AI-generated investigation reports
-- Interview-ready security architecture
