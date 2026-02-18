@@ -18,101 +18,164 @@ You have **2 machines**:
 
 ---
 
-# 🔵 PHASE 1 — Infrastructure Setup (Days 1–3)
+🔵 PHASE 1 — Infrastructure (Auth + Audit Only)
+🎯 Objective
 
-## 🎯 Goal
+Continuously move only:
 
-Get logs flowing from Machine 1 to Machine 2.
+/var/log/auth.log
 
----
+/var/log/audit/audit.log
 
-## Machine 1 (Target Setup)
+from Machine 1 → Machine 2.
 
-Install:
-
-```bash
+🔐 Machine 1 (Target)
+Install Required Components
 sudo apt update
-sudo apt install auditd openssh-server rsyslog
-```
+sudo apt install auditd openssh-server
 
-Enable audit rules:
+Enable Focused Audit Rules (Only What You Need)
 
-```bash
+Create /etc/audit/rules.d/soc.rules:
+
 -w /etc/passwd -p wa -k passwd_changes
 -w /etc/sudoers -p wa -k sudo_changes
+-w /etc/shadow -p wa -k shadow_changes
 -a always,exit -F arch=b64 -S execve -k command_exec
-```
+-a always,exit -F arch=b64 -S setuid,setgid -k privilege_change
+
+
+Reload:
+
+sudo augenrules --load
+sudo systemctl restart auditd
+
 
 Verify:
 
-```bash
 sudo ausearch -k command_exec
-```
 
----
 
-## Machine 2 (SOC Setup)
+You now capture:
+
+All command executions
+
+Privilege changes
+
+Critical file modifications
+
+That’s enough to detect:
+
+Brute force
+
+Privilege escalation
+
+Persistence
+
+Suspicious command usage
+
+📦 Machine 2 (SOC)
 
 Install:
 
-```bash
 sudo apt install python3 python3-pip redis-server
-pip install fastapi uvicorn pyod tsfresh scikit-learn
-```
+pip install fastapi uvicorn pyod scikit-learn
 
-Install Ollama locally:
 
-```bash
+(Omit tsfresh for now — keep features handcrafted.)
+
+Install Ollama:
+
 curl -fsSL https://ollama.com/install.sh | sh
 ollama pull mistral
-```
 
----
+🔁 Log Transfer (Safer Method)
 
-## Log Transfer (Simple Method First)
+Instead of raw scp every 30 seconds (inefficient), use incremental rsync:
 
-On Machine 2:
-Create pull script:
+rsync -avz user@machine1:/var/log/auth.log ./logs/
+rsync -avz user@machine1:/var/log/audit/audit.log ./logs/
 
-```bash
-scp user@machine1:/var/log/auth.log ./logs/
-scp user@machine1:/var/log/audit/audit.log ./logs/
-```
 
-Automate with cron every 30 seconds.
+Cron every 30–60 seconds.
 
----
+✅ End Phase 1
 
-## ✅ Deliverable End of Phase 1
+You have:
 
-* Logs from Machine 1 appear on Machine 2.
-* No AI yet.
-* Just verified pipeline.
+auth.log flowing
 
----
+audit.log flowing
 
-# 🟢 PHASE 2 — Log Normalization Engine (Days 4–6)
+Verified continuous ingestion
 
-## 🎯 Goal
+No AI. No parsing yet.
 
-Convert raw logs into structured JSON.
+🟢 PHASE 2 — Normalization Engine (Auth + Audit Only)
 
----
+We build two focused parsers.
 
-## Step 1 — Build Parser Module
-
-Create:
-
-```
 /soc_engine/
     ingestion/
         auth_parser.py
         audit_parser.py
-```
 
-Each parser converts raw log lines into unified schema:
+🔐 auth.log → What You Extract
 
-```python
+From sshd entries:
+
+Example:
+
+Failed password for invalid user admin from 10.0.0.5 port 445 ssh2
+
+
+Extract:
+
+{
+  "timestamp": "",
+  "event_type": "failed_login",
+  "user": "admin",
+  "source_ip": "10.0.0.5",
+  "host": "",
+  "command": null
+}
+
+
+Also detect:
+
+Successful SSH login
+
+sudo usage
+
+session opened/closed
+
+🛠 audit.log → What You Extract
+
+From:
+
+type=EXECVE msg=audit(...)
+
+
+Extract:
+
+{
+  "timestamp": "",
+  "event_type": "command_exec",
+  "user": "",
+  "command": "/usr/bin/nmap",
+  "source_ip": null
+}
+
+
+Also detect:
+
+setuid/setgid → privilege_change
+
+passwd_changes
+
+shadow_changes
+
+Unified Schema (Same as Before)
 {
   "timestamp": "",
   "host": "",
@@ -122,15 +185,8 @@ Each parser converts raw log lines into unified schema:
   "command": "",
   "raw": ""
 }
-```
 
----
-
-## Step 2 — Store in Local Database
-
-Use SQLite (simple):
-
-```python
+SQLite Table (Add event_category)
 CREATE TABLE events (
     id INTEGER PRIMARY KEY,
     timestamp TEXT,
@@ -139,139 +195,146 @@ CREATE TABLE events (
     event_type TEXT,
     source_ip TEXT,
     command TEXT,
-    anomaly_score REAL
+    anomaly_score REAL DEFAULT 0,
+    incident_id TEXT
 );
-```
 
-Insert normalized logs.
+✅ End Phase 2
 
----
+You now have:
 
-## ✅ Deliverable
+Structured SSH login data
 
-* All logs converted to structured format.
-* Queryable locally.
-* No ML yet.
+Structured command execution data
 
----
+Privilege changes captured
 
-# 🟡 PHASE 3 — UEBA + Anomaly Detection (Days 7–10)
+Everything stored locally
 
-## 🎯 Goal
+This is already a basic SIEM.
 
-Detect abnormal behavior.
+🟡 PHASE 3 — UEBA (Auth + Audit Focused)
 
----
+Since you only have auth + audit, your behavioral features become:
 
-## Step 1 — Feature Extraction
+👤 Per User Behavior Profile
 
-For each user:
+From auth.log:
 
-Compute:
+Login frequency per hour
 
-* Login frequency per hour
-* Failed login count
-* Unique IP count
-* Command frequency
-* First-time command usage
+Failed login ratio
 
-Use tsfresh or simple rolling stats.
+New IP detection
 
----
+First login time baseline
 
-## Step 2 — Anomaly Model
+From audit.log:
 
-Use PyOD:
+Command frequency
 
-```python
+First-time command usage
+
+High-risk command usage (nmap, nc, curl, wget, bash -i)
+
+Privilege change count
+
+🔎 Feature Vector Example
+[
+  login_rate,
+  failed_login_ratio,
+  unique_ip_count,
+  command_rate,
+  new_command_flag,
+  privilege_change_flag
+]
+
+
+Use:
+
 from pyod.models.iforest import IForest
 
-model = IForest()
-model.fit(user_behavior_vectors)
-scores = model.decision_function(new_event)
-```
 
-Add anomaly_score to database.
+Isolation Forest works well here.
 
----
+Threshold Logic
 
-## Step 3 — Threshold Rule
+Since auth + audit only:
 
-If:
+IF anomaly_score > 0.75
+→ suspicious
 
-```
-anomaly_score > 0.8
-```
+✅ End Phase 3
 
-→ Mark as suspicious
+System detects:
 
----
+Abnormal SSH behavior
 
-## ✅ Deliverable
+Abnormal command behavior
 
-System flags abnormal events automatically.
+Abnormal privilege usage
 
----
+🟠 PHASE 4 — Correlation (Auth + Audit Based Incidents)
 
-# 🟠 PHASE 4 — Correlation Engine (Days 11–14)
+Now incidents are built only from:
 
-## 🎯 Goal
+failed_login
 
-Group related events into incidents.
+successful_login
 
----
+command_exec
 
-## Step 1 — Time Window Aggregation
+privilege_change
 
-Group events:
+passwd_changes
 
-* Same user
-* Same host
-* Within 10-minute window
+shadow_changes
 
----
+🔗 Correlation Rules (Focused)
+1️⃣ Brute Force → Success
+IF failed_login > 5
+AND successful_login within 5 min
+→ brute_force_success
 
-## Step 2 — Correlation Rules
+2️⃣ Privilege Escalation
+IF successful_login
+AND privilege_change
+AND anomaly_score high
+→ privilege_escalation
 
-Example rules:
+3️⃣ Persistence via Cron
 
-```
-IF failed_ssh > 5 AND successful_ssh = 1
-→ Possible brute force success
-```
+From audit.log detect:
 
-```
-IF sudo_exec AND anomaly_score high
-→ Privilege escalation
-```
+/etc/cron*
 
-Build rule engine module:
+IF command_exec modifying cron
+→ persistence_attempt
 
-```
-correlation/rule_engine.py
-```
+4️⃣ Suspicious Command After Login
+successful_login
+→ command_exec in <2 minutes
+→ high risk command
 
----
-
-## Step 3 — Incident Object Creation
-
-Create incident JSON:
-
-```json
+Incident Object
 {
   "incident_id": "...",
-  "pattern_features": {...},
-  "severity": "high"
+  "type": "privilege_escalation",
+  "user": "...",
+  "host": "...",
+  "severity": "high",
+  "events": [...]
 }
-```
 
----
+✅ End Phase 4
 
-## ✅ Deliverable
+You now generate meaningful incidents using only:
 
-System produces structured INCIDENT objects.
+SSH data
 
----
+System call data
+
+That is clean and realistic.
 
 # 🔴 PHASE 5 — Pattern Fingerprinting + Cache (Days 15–17)
 
